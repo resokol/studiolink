@@ -2,13 +2,19 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { LiveKitRoom, VideoConference } from "@livekit/components-react";
+import {
+  LiveKitRoom,
+  PreJoin,
+  VideoConference,
+  type LocalUserChoices,
+} from "@livekit/components-react";
 
 function RoomContent() {
   const params = useSearchParams();
   const room = params.get("name") || "demo-room";
   const [token, setToken] = useState<string>();
   const [error, setError] = useState<string>();
+  const [userChoices, setUserChoices] = useState<LocalUserChoices>();
 
   useEffect(() => {
     fetch(
@@ -27,6 +33,22 @@ function RoomContent() {
   if (error) return <main><div className="panel">Ошибка: {error}</div></main>;
   if (!token) return <main><div className="panel">Подключение к комнате…</div></main>;
 
+  if (!userChoices) {
+    return (
+      <main>
+        <h1>{room}</h1>
+        <PreJoin
+          joinLabel="Войти в комнату"
+          micLabel="Микрофон"
+          camLabel="Камера"
+          persistUserChoices
+          onSubmit={setUserChoices}
+          onError={(err) => setError(err.message)}
+        />
+      </main>
+    );
+  }
+
   return (
     <main>
       <h1>{room}</h1>
@@ -34,8 +56,8 @@ function RoomContent() {
         token={token}
         serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL}
         connect
-        audio
-        video
+        audio={userChoices.audioEnabled ? { deviceId: userChoices.audioDeviceId } : false}
+        video={userChoices.videoEnabled ? { deviceId: userChoices.videoDeviceId } : false}
       >
         <VideoConference />
       </LiveKitRoom>
