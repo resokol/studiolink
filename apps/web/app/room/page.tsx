@@ -1,17 +1,21 @@
 "use client";
 
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { LiveKitRoom, VideoConference } from "@livekit/components-react";
-import { useEffect, useState } from "react";
 
-export default function RoomPage() {
+function RoomContent() {
   const params = useSearchParams();
   const room = params.get("name") || "demo-room";
   const [token, setToken] = useState<string>();
   const [error, setError] = useState<string>();
 
   useEffect(() => {
-    fetch(`/api/token?room=${encodeURIComponent(room)}&identity=${encodeURIComponent(`user-${Math.random().toString(36).slice(2, 8)}`)}`)
+    fetch(
+      `/api/token?room=${encodeURIComponent(room)}&identity=${encodeURIComponent(
+        `user-${Math.random().toString(36).slice(2, 8)}`
+      )}`
+    )
       .then(async (response) => {
         if (!response.ok) throw new Error(await response.text());
         return response.json();
@@ -26,9 +30,23 @@ export default function RoomPage() {
   return (
     <main>
       <h1>{room}</h1>
-      <LiveKitRoom token={token} serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL} connect audio video>
+      <LiveKitRoom
+        token={token}
+        serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL}
+        connect
+        audio
+        video
+      >
         <VideoConference />
       </LiveKitRoom>
     </main>
+  );
+}
+
+export default function RoomPage() {
+  return (
+    <Suspense fallback={<main><div className="panel">Загрузка комнаты…</div></main>}>
+      <RoomContent />
+    </Suspense>
   );
 }
