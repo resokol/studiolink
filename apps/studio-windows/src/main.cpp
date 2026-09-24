@@ -1,4 +1,4 @@
-#include <windows.h>
+#include <windows.h>\n#include <objbase.h>
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
   return DefWindowProc(hwnd, msg, wp, lp);
