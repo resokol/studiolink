@@ -73,12 +73,12 @@ static void ConnectNative(HWND hwnd) {
       livekit::initialize(livekit::LogLevel::Info);
       auto r=std::make_unique<livekit::Room>();
       livekit::RoomOptions options; options.auto_subscribe=true;
-      bool ok=r->connect("wss://192.168.53.68:8443",token,options);
+      bool ok=r->connect("ws://192.168.53.68:7880",token,options);
       if(ok) {
         auto count=r->remoteParticipants().size();
         g_livekit_room=std::move(r);
         PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"CONNECTED - remote participants: "+std::to_wstring(count)));
-      } else PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"LiveKit connect failed"));
+      } else PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"LiveKit connect failed (LAN ws://192.168.53.68:7880)"));
     } catch(...) { PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"LiveKit exception")); }
     g_connecting=false;
   }).detach();
