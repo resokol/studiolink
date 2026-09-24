@@ -11,6 +11,8 @@
 #include "livekit/livekit.h"
 
 static HWND g_status = nullptr;
+static HWND g_meter = nullptr;
+static double g_db = -120.0;
 static HWND g_room = nullptr;
 static HWND g_name = nullptr;
 static std::unique_ptr<livekit::Room> g_livekit_room;
@@ -28,6 +30,19 @@ static std::string WideToUtf8(const std::wstring& value) {
   std::string out(size,0);
   WideCharToMultiByte(CP_UTF8,0,value.c_str(),(int)value.size(),out.data(),size,nullptr,nullptr);
   return out;
+}
+
+static void DrawMeter(HWND hwnd, HDC hdc) {
+  RECT r{}; GetClientRect(hwnd,&r);
+  HBRUSH bg=CreateSolidBrush(RGB(18,22,29)); FillRect(hdc,&r,bg); DeleteObject(bg);
+  double norm=(g_db+60.0)/60.0; if(norm<0) norm=0; if(norm>1) norm=1;
+  RECT fill=r; fill.right=r.left+(LONG)((r.right-r.left)*norm);
+  HBRUSH bar=CreateSolidBrush(g_db>-6?RGB(255,86,86):(g_db>-18?RGB(245,183,65):RGB(54,211,153)));
+  FillRect(hdc,&fill,bar); DeleteObject(bar);
+}
+static LRESULT CALLBACK MeterProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
+  if(msg==WM_PAINT){PAINTSTRUCT ps{};HDC hdc=BeginPaint(hwnd,&ps);DrawMeter(hwnd,hdc);EndPaint(hwnd,&ps);return 0;}
+  return DefWindowProc(hwnd,msg,wp,lp);
 }
 
 static std::wstring ReadText(HWND edit) {
@@ -106,7 +121,7 @@ static void StartPcmMeter(HWND hwnd) {
       wchar_t text[256];
       swprintf_s(text, L"PCM LIVE  %hs  |  %.1f dBFS  |  %d Hz / %d ch / %d samples",
         who.c_str(), db, ev.frame.sampleRate(), ev.frame.numChannels(), ev.frame.samplesPerChannel());
-      PostMessageW(hwnd, WM_APP+1, 0, (LPARAM)new std::wstring(text));
+      PostMessageW(hwnd, WM_APP+2, 0, (LPARAM)new double(db));
     }
     g_meter_running = false;
   }).detach();
@@ -140,17 +155,23 @@ static void ConnectNative(HWND hwnd) {
 
 static LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
   if(msg==WM_CREATE) {
-    CreateWindowW(L"STATIC",L"StudioLink Studio - native Windows / LiveKit C++",WS_CHILD|WS_VISIBLE,30,25,700,30,hwnd,nullptr,nullptr,nullptr);
+    HFONT ui=CreateFontW(20,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    HFONT title=CreateFontW(32,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    HWND hTitle=CreateWindowW(L"STATIC",L"StudioLink Studio",WS_CHILD|WS_VISIBLE,36,28,700,44,hwnd,nullptr,nullptr,nullptr); SendMessageW(hTitle,WM_SETFONT,(WPARAM)title,TRUE);
+    HWND sub=CreateWindowW(L"STATIC",L"Native broadcast control  /  LiveKit",WS_CHILD|WS_VISIBLE,38,70,700,28,hwnd,nullptr,nullptr,nullptr); SendMessageW(sub,WM_SETFONT,(WPARAM)ui,TRUE);
     CreateWindowW(L"STATIC",L"Room:",WS_CHILD|WS_VISIBLE,30,80,80,25,hwnd,nullptr,nullptr,nullptr);
     g_room=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"test-room",WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,110,75,300,30,hwnd,nullptr,nullptr,nullptr);
     CreateWindowW(L"STATIC",L"Name:",WS_CHILD|WS_VISIBLE,30,125,80,25,hwnd,nullptr,nullptr,nullptr);
     g_name=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"Windows Studio",WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,110,120,300,30,hwnd,nullptr,nullptr,nullptr);
     CreateWindowW(L"BUTTON",L"CONNECT",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,110,175,180,42,hwnd,(HMENU)100,nullptr,nullptr);
-    g_status=CreateWindowW(L"STATIC",L"Ready. Native SDK 1.12.0",WS_CHILD|WS_VISIBLE,30,245,900,35,hwnd,nullptr,nullptr,nullptr);
+    g_status=CreateWindowW(L"STATIC",L"READY  -  Native SDK 1.12.0",WS_CHILD|WS_VISIBLE,36,260,900,32,hwnd,nullptr,nullptr,nullptr); SendMessageW(g_status,WM_SETFONT,(WPARAM)ui,TRUE);
+    HWND meterLabel=CreateWindowW(L"STATIC",L"GUEST MICROPHONE  /  PCM dBFS",WS_CHILD|WS_VISIBLE,36,330,600,28,hwnd,nullptr,nullptr,nullptr); SendMessageW(meterLabel,WM_SETFONT,(WPARAM)ui,TRUE);
+    g_meter=CreateWindowW(L"StudioLinkMeter",L"",WS_CHILD|WS_VISIBLE,36,370,850,28,hwnd,nullptr,nullptr,nullptr);
     return 0;
   }
   if(msg==WM_COMMAND && LOWORD(wp)==100) { ConnectNative(hwnd); return 0; }
   if(msg==WM_APP+1) { auto* s=(std::wstring*)lp; SetStatus(*s); delete s; return 0; }
+  if(msg==WM_APP+2) { auto* v=(double*)lp; g_db=*v; delete v; wchar_t t[128]; swprintf_s(t,L"PCM LIVE  |  %.1f dBFS  |  48 kHz",g_db); SetStatus(t); InvalidateRect(g_meter,nullptr,FALSE); return 0; }
   if(msg==WM_DESTROY) { if(g_audio_stream) g_audio_stream->close(); g_audio_stream.reset(); g_livekit_room.reset(); livekit::shutdown(); PostQuitMessage(0); return 0; }
   return DefWindowProc(hwnd,msg,wp,lp);
 }
@@ -158,7 +179,8 @@ static LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
   CoInitializeEx(nullptr,COINIT_MULTITHREADED);
   const wchar_t cls[]=L"StudioLinkStudioWindow";
-  WNDCLASS wc{}; wc.lpfnWndProc=WindowProc; wc.hInstance=instance; wc.lpszClassName=cls; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);
+  WNDCLASS mw{}; mw.lpfnWndProc=MeterProc; mw.hInstance=instance; mw.lpszClassName=L"StudioLinkMeter"; mw.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClass(&mw);
+  WNDCLASS wc{}; wc.lpfnWndProc=WindowProc; wc.hInstance=instance; wc.lpszClassName=cls; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.hbrBackground=CreateSolidBrush(RGB(242,245,249));
   RegisterClass(&wc);
   HWND hwnd=CreateWindowEx(0,cls,L"StudioLink Studio - Native Windows",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1100,650,nullptr,nullptr,instance,nullptr);
   if(!hwnd) return 1; ShowWindow(hwnd,show);
