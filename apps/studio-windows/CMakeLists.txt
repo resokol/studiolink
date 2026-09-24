@@ -5,6 +5,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT WIN32)
   message(FATAL_ERROR "StudioLink Studio Windows must be built on Windows with MSVC.")
 endif()
+
+set(LIVEKIT_SDK_VERSION "1.12.0" CACHE STRING "LiveKit C++ SDK version")
+set(LIVEKIT_SDK_DIR "${CMAKE_BINARY_DIR}/livekit-sdk")
+set(LIVEKIT_SDK_ZIP "${CMAKE_BINARY_DIR}/livekit-sdk.zip")
+set(LIVEKIT_SDK_URL "https://github.com/livekit/client-sdk-cpp/releases/download/v${LIVEKIT_SDK_VERSION}/livekit-sdk-windows-x64-${LIVEKIT_SDK_VERSION}.zip")
+if(NOT EXISTS "${LIVEKIT_SDK_DIR}/lib/livekit.lib")
+  file(DOWNLOAD "${LIVEKIT_SDK_URL}" "${LIVEKIT_SDK_ZIP}" SHOW_PROGRESS STATUS dl_status)
+  list(GET dl_status 0 dl_code)
+  if(NOT dl_code EQUAL 0)
+    message(FATAL_ERROR "Failed to download LiveKit SDK: ${dl_status}")
+  endif()
+  file(MAKE_DIRECTORY "${LIVEKIT_SDK_DIR}")
+  file(ARCHIVE_EXTRACT INPUT "${LIVEKIT_SDK_ZIP}" DESTINATION "${LIVEKIT_SDK_DIR}")
+endif()
+
 add_executable(StudioLinkStudio WIN32 src/main.cpp)
-target_compile_definitions(StudioLinkStudio PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
-target_link_libraries(StudioLinkStudio PRIVATE ole32 avrt)
+target_compile_definitions(StudioLinkStudio PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(StudioLinkStudio PRIVATE "${LIVEKIT_SDK_DIR}/include")
+target_link_libraries(StudioLinkStudio PRIVATE "${LIVEKIT_SDK_DIR}/lib/livekit.lib" ole32 winhttp)
+add_custom_command(TARGET StudioLinkStudio POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LIVEKIT_SDK_DIR}/bin/livekit.dll" "$<TARGET_FILE_DIR:StudioLinkStudio>/livekit.dll"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LIVEKIT_SDK_DIR}/bin/livekit_ffi.dll" "$<TARGET_FILE_DIR:StudioLinkStudio>/livekit_ffi.dll"
+)
