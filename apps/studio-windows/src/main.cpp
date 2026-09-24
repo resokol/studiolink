@@ -2,6 +2,8 @@
 #include <objbase.h>
 #include <winhttp.h>
 #include <atomic>
+#include <cmath>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <thread>
@@ -13,6 +15,8 @@ static HWND g_room = nullptr;
 static HWND g_name = nullptr;
 static std::unique_ptr<livekit::Room> g_livekit_room;
 static std::atomic<bool> g_connecting{false};
+static std::atomic<bool> g_meter_running{false};
+static std::shared_ptr<livekit::AudioStream> g_audio_stream;
 
 static void SetStatus(const std::wstring& text) {
   if (g_status) SetWindowTextW(g_status, text.c_str());
@@ -60,6 +64,54 @@ static std::string JsonString(const std::string& json,const std::string& key) {
   p+=needle.size(); auto e=json.find('"',p); return e==std::string::npos?std::string{}:json.substr(p,e-p);
 }
 
+static void StartPcmMeter(HWND hwnd) {
+  if (g_meter_running.exchange(true)) return;
+  std::thread([hwnd] {
+    std::shared_ptr<livekit::Track> audioTrack;
+    std::string who;
+    if (g_livekit_room) {
+      for (auto& weak : g_livekit_room->remoteParticipants()) {
+        if (auto p = weak.lock()) {
+          for (const auto& kv : p->trackPublications()) {
+            const auto& pub = kv.second;
+            if (pub && pub->kind() == livekit::TrackKind::KIND_AUDIO && pub->track()) {
+              audioTrack = pub->track();
+              who = p->identity();
+              break;
+            }
+          }
+        }
+        if (audioTrack) break;
+      }
+    }
+    if (!audioTrack) {
+      PostMessageW(hwnd, WM_APP+1, 0, (LPARAM)new std::wstring(L"CONNECTED - waiting for subscribed audio track"));
+      g_meter_running = false;
+      return;
+    }
+    livekit::AudioStream::Options opts;
+    opts.capacity = 2;
+    g_audio_stream = livekit::AudioStream::fromTrack(audioTrack, opts);
+    livekit::AudioFrameEvent ev;
+    while (g_audio_stream && g_audio_stream->read(ev)) {
+      const auto& pcm = ev.frame.data();
+      if (pcm.empty()) continue;
+      long double sum = 0.0;
+      for (auto s : pcm) {
+        const long double v = (long double)s / 32768.0L;
+        sum += v * v;
+      }
+      const double rms = std::sqrt((double)(sum / pcm.size()));
+      const double db = rms > 0.000001 ? 20.0 * std::log10(rms) : -120.0;
+      wchar_t text[256];
+      swprintf_s(text, L"PCM LIVE  %hs  |  %.1f dBFS  |  %d Hz / %d ch / %d samples",
+        who.c_str(), db, ev.frame.sampleRate(), ev.frame.numChannels(), ev.frame.samplesPerChannel());
+      PostMessageW(hwnd, WM_APP+1, 0, (LPARAM)new std::wstring(text));
+    }
+    g_meter_running = false;
+  }).detach();
+}
+
 static void ConnectNative(HWND hwnd) {
   if(g_connecting.exchange(true)) return;
   SetStatus(L"Connecting natively to LiveKit...");
@@ -78,6 +130,8 @@ static void ConnectNative(HWND hwnd) {
         auto count=r->remoteParticipants().size();
         g_livekit_room=std::move(r);
         PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"CONNECTED - remote participants: "+std::to_wstring(count)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        StartPcmMeter(hwnd);
       } else PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"LiveKit connect failed (LAN ws://192.168.53.68:7880)"));
     } catch(...) { PostMessageW(hwnd,WM_APP+1,0,(LPARAM)new std::wstring(L"LiveKit exception")); }
     g_connecting=false;
@@ -97,7 +151,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
   }
   if(msg==WM_COMMAND && LOWORD(wp)==100) { ConnectNative(hwnd); return 0; }
   if(msg==WM_APP+1) { auto* s=(std::wstring*)lp; SetStatus(*s); delete s; return 0; }
-  if(msg==WM_DESTROY) { g_livekit_room.reset(); livekit::shutdown(); PostQuitMessage(0); return 0; }
+  if(msg==WM_DESTROY) { if(g_audio_stream) g_audio_stream->close(); g_audio_stream.reset(); g_livekit_room.reset(); livekit::shutdown(); PostQuitMessage(0); return 0; }
   return DefWindowProc(hwnd,msg,wp,lp);
 }
 
