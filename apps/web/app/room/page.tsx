@@ -15,11 +15,12 @@ function RoomContent() {
   const [token, setToken] = useState<string>();
   const [error, setError] = useState<string>();
   const [userChoices, setUserChoices] = useState<LocalUserChoices>();
+  const [identity] = useState(() => `user-${Math.random().toString(36).slice(2, 8)}`);
 
   useEffect(() => {
     fetch(
       `/api/token?room=${encodeURIComponent(room)}&identity=${encodeURIComponent(
-        `user-${Math.random().toString(36).slice(2, 8)}`
+        identity
       )}`
     )
       .then(async (response) => {
@@ -28,7 +29,7 @@ function RoomContent() {
       })
       .then((data) => setToken(data.token))
       .catch((err) => setError(err.message));
-  }, [room]);
+  }, [room, identity]);
 
   if (error) return <main><div className="panel">Ошибка: {error}</div></main>;
   if (!token) return <main><div className="panel">Подключение к комнате…</div></main>;
@@ -52,6 +53,10 @@ function RoomContent() {
   return (
     <main>
       <h1>{room}</h1>
+      <div className="panel room-info">
+        <div><strong>Guest ID:</strong> {identity}</div>
+        <a href={`/output/${encodeURIComponent(identity)}?room=${encodeURIComponent(room)}`} target="_blank" rel="noreferrer">Открыть выход для vMix</a>
+      </div>
       <LiveKitRoom
         token={token}
         serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL}
