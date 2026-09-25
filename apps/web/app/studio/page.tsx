@@ -1,5 +1,6 @@
-[Reading 378 lines from line 1 (total: 379 lines, 0 remaining)]
+[Reading 495 lines from start (total: 495 lines, 0 remaining)]
 
+"use client";
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -25,6 +26,59 @@ type GuestStat = {
   signalDb?: number;
 };
 
+function GuestAudioMeter({ track, fallbackDb = -60 }: { track?: RemoteAudioTrack; fallbackDb?: number }) {
+  const [db, setDb] = useState(fallbackDb);
+  const [debug, setDebug] = useState("PCM: ожидание");
+  useEffect(() => {
+    if (!track?.mediaStreamTrack) { setDb(fallbackDb); setDebug("PCM: нет track"); return; }
+    let stopped = false, raf = 0, ctx: AudioContext | undefined, source: MediaStreamAudioSourceNode | undefined, analyser: AnalyserNode | undefined, sink: GainNode | undefined;
+    let meterTrack: MediaStreamTrack | undefined;
+    let shown = 0, frames = 0, lastDebug = 0;
+    try {
+      ctx = new AudioContext({ latencyHint: "interactive", sampleRate: 48000 });
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0;
+      meterTrack = track.mediaStreamTrack.clone();
+      source = ctx.createMediaStreamSource(new MediaStream([meterTrack]));
+      sink = ctx.createGain();
+      sink.gain.value = 0;
+      source.connect(analyser);
+      analyser.connect(sink);
+      sink.connect(ctx.destination);
+      const data = new Float32Array(analyser.fftSize);
+      void ctx.resume();
+      const tick = (now: number) => {
+        if (stopped || !analyser || !ctx) return;
+        analyser.getFloatTimeDomainData(data);
+        let sum = 0, peak = 0;
+        for (let i = 0; i < data.length; i++) { const v = data[i]; sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+        const rms = Math.sqrt(sum / data.length);
+        shown = rms >= shown ? rms : Math.max(rms, shown * 0.68);
+        const nextDb = shown > 0.0001 ? Math.max(-60, Math.min(0, 20 * Math.log10(shown))) : -60;
+        setDb(nextDb);
+        frames++;
+        if (now - lastDebug > 500) {
+          setDebug(`PCM direct: ${ctx.state} · rms=${rms.toFixed(5)} · peak=${peak.toFixed(5)} · ${frames}f`);
+          frames = 0; lastDebug = now;
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    } catch (e) {
+      setDebug(`PCM ERROR: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+      try { source?.disconnect(); analyser?.disconnect(); sink?.disconnect(); meterTrack?.stop(); } catch {}
+      void ctx?.close();
+    };
+  }, [track, fallbackDb]);
+  const width = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+  return <><span className="signal-row vdo-audio-level"><b>MIC</b><i className="signal-meter"><i style={{width: `${width}%`}} /></i><strong>{db.toFixed(1)} dBFS</strong></span><small style={{display:"block",opacity:.7}}>{debug}</small></>;
+}
+
 function StudioContent() {
   const params = useSearchParams();
   const roomName = params.get("room") || "demo-room";
@@ -36,8 +90,12 @@ function StudioContent() {
   const [guestVolumes, setGuestVolumes] = useState<Record<string, number>>({});
   const [guestMuted, setGuestMuted] = useState<Record<string, boolean>>({});
   const [returnStats, setReturnStats] = useState({ resolution: "—", videoKbps: 0, audioKbps: 0, fps: 0 });
+  const [statsDebug, setStatsDebug] = useState("ожидание");
+  const [audioDebug, setAudioDebug] = useState<Record<string,string>>({});
   const returnPrevStats = useRef({ videoBytes: 0, audioBytes: 0, ts: 0 });
   const clientInfoRef = useRef<Record<string, { camera?: string; cpu?: string; gpu?: string; platform?: string; sampleRate?: number }>>({});
+  const guestMeterTargetsRef = useRef<Record<string, number>>({});
+  const guestMeterDisplayRef = useRef<Record<string, number>>({});
   const [returnVideoDevice, setReturnVideoDevice] = useState("");
   const [returnAudioDevice, setReturnAudioDevice] = useState("");
   const [returnDevices, setReturnDevices] = useState<MediaDeviceInfo[]>([]);
@@ -47,15 +105,20 @@ function StudioContent() {
   const [returnActive, setReturnActive] = useState(false);
   const [onAir, setOnAir] = useState(false);
   const onAirRef = useRef(false);
+  const refreshRef = useRef<() => Promise<void>>(async () => {});
   const [onAirStatus, setOnAirStatus] = useState("OFF AIR");
   const returnVideoRef = useRef<HTMLVideoElement>(null);
   const guestVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const returnStreamRef = useRef<MediaStream | undefined>(undefined);
+  const returnPublishedRef = useRef<{ video?: any; audio?: any }>({});
+  const returnPublicationRef = useRef<{ video?: any; audio?: any }>({});
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | undefined;
+    let meterRaf = 0;
     const previous = new Map<string, { bytes: number; ts: number }>();
+    const previousAudio = new Map<string, { energy: number; duration: number }>();
 
     const refresh = async () => {
       const rows: GuestStat[] = [];
@@ -91,16 +154,9 @@ function StudioContent() {
         }
 
         if (micPub?.track) {
-          const audioReport = await micPub.track.getRTCStatsReport();
-          audioReport?.forEach((stat) => {
-            if (stat.type === "inbound-rtp" && stat.kind === "audio") {
-              const linear = Number(stat.audioLevel || 0);
-              if (linear > 0) {
-                signalDb = Math.max(-60, Math.min(0, 20 * Math.log10(linear)));
-                signalLevel = Math.round(Math.max(0, Math.min(100, (signalDb + 60) / 60 * 100)));
-              }
-            }
-          });
+          const linear = Number(participant.audioLevel || 0);
+          signalDb = linear > 0 ? Math.max(-60, Math.min(0, 20 * Math.log10(linear))) : -60;
+          signalLevel = Math.round(Math.max(0, Math.min(100, linear * 100)));
         }
 
         const stability: GuestStat["stability"] =
@@ -127,11 +183,14 @@ function StudioContent() {
           signalDb,
         });
       }
-      if (onAir) {
-        const cameraPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-        const micPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
-        const videoTrack = cameraPub?.track;
-        const audioTrack = micPub?.track;
+      if (onAirRef.current) {
+        const localPubs = Array.from(room.localParticipant.trackPublications.values()) as any[];
+        const videoPubNow = returnPublicationRef.current.video || localPubs.find((p:any) => p.kind === Track.Kind.Video);
+        const audioPubNow = returnPublicationRef.current.audio || localPubs.find((p:any) => p.kind === Track.Kind.Audio);
+        const videoTrack = returnPublishedRef.current.video || videoPubNow?.track;
+        const audioTrack = returnPublishedRef.current.audio || audioPubNow?.track;
+        if (videoTrack) returnPublishedRef.current.video = videoTrack;
+        if (audioTrack) returnPublishedRef.current.audio = audioTrack;
         let resolution = "—", videoKbps = 0, audioKbps = 0, videoBytes = 0, audioBytes = 0, fps = 0, packets = 0, ts = performance.now();
         if (videoTrack && "getSenderStats" in videoTrack) {
           const stats = await (videoTrack as any).getSenderStats();
@@ -162,15 +221,30 @@ function StudioContent() {
           });
         }
         const prev = returnPrevStats.current;
+        const videoStats = videoTrack && "getSenderStats" in videoTrack ? await (videoTrack as any).getSenderStats() : [];
+        const videoList = Array.isArray(videoStats) ? videoStats : videoStats ? [videoStats] : [];
+        const activeVideo = videoList.reduce((best: any, s: any) => Number(s.bytesSent || 0) > Number(best?.bytesSent || 0) ? s : best, undefined);
+        const audioStats = audioTrack && "getSenderStats" in audioTrack ? await (audioTrack as any).getSenderStats() : undefined;
+        if (activeVideo) {
+          videoBytes = Number(activeVideo.bytesSent || 0);
+          fps = Number(activeVideo.framesPerSecond || 0);
+          if (activeVideo.frameWidth && activeVideo.frameHeight) resolution = activeVideo.frameWidth + "×" + activeVideo.frameHeight;
+          ts = Number(activeVideo.timestamp || ts);
+        }
+        if (audioStats) audioBytes = Number(audioStats.bytesSent || 0);
         if (prev.ts && ts > prev.ts) {
           videoKbps = Math.max(0, Math.round((videoBytes - prev.videoBytes) * 8 / (ts - prev.ts)));
           audioKbps = Math.max(0, Math.round((audioBytes - prev.audioBytes) * 8 / (ts - prev.ts)));
         }
         returnPrevStats.current = { videoBytes, audioBytes, ts };
-        if (!cancelled) setReturnStats({ resolution, videoKbps, audioKbps, fps });
-      } else if (!cancelled) setReturnStats({ resolution: "—", videoKbps: 0, audioKbps: 0, fps: 0 });
+        if (!cancelled) {
+          setReturnStats({ resolution, videoKbps, audioKbps, fps });
+          setStatsDebug(`ON AIR=${onAirRef.current}; pubs=${localPubs.length}; videoPub=${!!videoPubNow}; audioPub=${!!audioPubNow}; videoTrack=${!!videoTrack}; audioTrack=${!!audioTrack}; videoStats=${videoList.length}; videoBytes=${videoBytes}; audioBytes=${audioBytes}; ts=${Math.round(ts)}`);
+        }
+      } else if (!cancelled) { setReturnStats({ resolution: "—", videoKbps: 0, audioKbps: 0, fps: 0 }); setStatsDebug(`ON AIR=${onAirRef.current}; публикация выключена`); }
       if (!cancelled) setGuests(rows);
     };
+    refreshRef.current = refresh;
 
     (async () => {
       try {
@@ -182,6 +256,22 @@ function StudioContent() {
         if (!cancelled) setStatus("Онлайн");
         await refresh();
         timer = setInterval(refresh, 2000);
+        const animateMeters = () => {
+          if (cancelled) return;
+          setGuests((current) => current.map((g) => {
+            const target = guestMeterTargetsRef.current[g.identity] ?? 0;
+            const shown = guestMeterDisplayRef.current[g.identity] ?? 0;
+            const next = target > shown
+              ? shown + (target - shown) * 0.72
+              : shown + (target - shown) * 0.12;
+            const settled = next < 0.0005 ? 0 : next;
+            guestMeterDisplayRef.current[g.identity] = settled;
+            const signalDb = settled > 0 ? Math.max(-60, Math.min(0, 20 * Math.log10(settled))) : -60;
+            return { ...g, signalDb, signalLevel: Math.round(settled * 100) };
+          }));
+          meterRaf = requestAnimationFrame(animateMeters);
+        };
+        meterRaf = requestAnimationFrame(animateMeters);
       } catch (error) {
         if (!cancelled) setStatus(error instanceof Error ? error.message : "Ошибка подключения");
       }
@@ -194,6 +284,13 @@ function StudioContent() {
     room.on(RoomEvent.TrackUnpublished, update);
     room.on(RoomEvent.TrackMuted, update);
     room.on(RoomEvent.TrackUnmuted, update);
+    const updateMeterTargets = () => {
+      for (const participant of room.remoteParticipants.values()) {
+        if (!participant.identity.startsWith("guest-")) continue;
+        guestMeterTargetsRef.current[participant.identity] = Number(participant.audioLevel || 0);
+      }
+    };
+    room.on(RoomEvent.ActiveSpeakersChanged, updateMeterTargets);
     const onData = (payload: Uint8Array, participant?: { identity: string }, _kind?: unknown, topic?: string) => {
       if (topic !== "studiolink-client-info" || !participant?.identity.startsWith("guest-")) return;
       try { clientInfoRef.current[participant.identity] = JSON.parse(new TextDecoder().decode(payload)); void refresh(); } catch {}
@@ -205,11 +302,25 @@ function StudioContent() {
       if (el) track.attach(el);
     };
     room.on(RoomEvent.TrackSubscribed, attachGuestVideo);
+    const debugTracks = () => {
+      const next: Record<string,string> = {};
+      for (const p of room.remoteParticipants.values()) {
+        if (!p.identity.startsWith("guest-")) continue;
+        const pubs = Array.from(p.trackPublications.values());
+        next[p.identity] = pubs.map((x:any) => `${x.kind}/${x.source}/sub=${x.isSubscribed}/muted=${x.isMuted}/track=${!!x.track}`).join(" | ") || "нет publications";
+      }
+      setAudioDebug(next);
+    };
+    room.on(RoomEvent.TrackSubscribed, debugTracks);
+    room.on(RoomEvent.TrackPublished, debugTracks);
+    setInterval(debugTracks, 1000);
 
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
+      cancelAnimationFrame(meterRaf);
       room.off(RoomEvent.TrackSubscribed, attachGuestVideo);
+      room.off(RoomEvent.ActiveSpeakersChanged, updateMeterTargets);
       room.off(RoomEvent.DataReceived, onData);
       room.disconnect();
     };
@@ -232,10 +343,9 @@ function StudioContent() {
         if (returnVideoRef.current) { returnVideoRef.current.srcObject = stream; await returnVideoRef.current.play().catch(() => undefined); }
         const devices = await navigator.mediaDevices.enumerateDevices();
         setReturnDevices(devices);
-        const a = stream.getAudioTracks()[0]?.getSettings().deviceId || "";
-        const v = stream.getVideoTracks()[0]?.getSettings().deviceId || "";
-        if (!returnAudioDevice && a) setReturnAudioDevice(a);
-        if (!returnVideoDevice && v) setReturnVideoDevice(v);
+        // Do not copy the browser-selected default device IDs back into state here.
+        // Doing so retriggers this effect, its cleanup stops the very MediaStreamTracks
+        // that may already have been published by ON AIR, and LiveKit then unpublishes them.
         ctx = new AudioContext();
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 2048;
@@ -275,6 +385,9 @@ function StudioContent() {
         for (const publication of room.localParticipant.trackPublications.values()) {
           if (publication.track) await room.localParticipant.unpublishTrack(publication.track, false);
         }
+        returnPublishedRef.current = {};
+        returnPublicationRef.current = {};
+        returnPrevStats.current = { videoBytes: 0, audioBytes: 0, ts: 0 };
         onAirRef.current = false;
         setOnAir(false);
         setOnAirStatus("OFF AIR");
@@ -283,10 +396,14 @@ function StudioContent() {
       const video = stream.getVideoTracks()[0];
       const audio = stream.getAudioTracks()[0];
       if (!video || !audio) throw new Error("Нет видео или аудио Studio Return");
-      await room.localParticipant.publishTrack(video, { source: Track.Source.Camera, name: "Studio Return Video", simulcast: false, videoEncoding: { maxBitrate: 8_000_000, maxFramerate: 30 }, degradationPreference: "maintain-resolution" });
-      await room.localParticipant.publishTrack(audio, { source: Track.Source.Microphone, name: "Studio Return Audio", audioPreset: AudioPresets.musicHighQualityStereo, dtx: false, red: true });
+      const videoPub = await room.localParticipant.publishTrack(video, { source: Track.Source.Camera, name: "Studio Return Video", simulcast: false, videoEncoding: { maxBitrate: 8_000_000, maxFramerate: 30 }, degradationPreference: "maintain-resolution" });
+      const audioPub = await room.localParticipant.publishTrack(audio, { source: Track.Source.Microphone, name: "Studio Return Audio", audioPreset: AudioPresets.musicHighQualityStereo, dtx: false, red: true });
+      returnPublicationRef.current = { video: videoPub, audio: audioPub };
+      returnPublishedRef.current = { video: videoPub.track, audio: audioPub.track };
       onAirRef.current = true;
+      returnPrevStats.current = { videoBytes: 0, audioBytes: 0, ts: 0 };
       setOnAir(true);
+      void refreshRef.current();
       setOnAirStatus("ON AIR");
     } catch (e) {
       console.error("Studio Return publish failed", e);
@@ -339,7 +456,7 @@ function StudioContent() {
           </div>
         </div>}
       </div>
-      <div className="panel return-stats"><strong>Исходящий поток студии</strong><span>Видео: {returnStats.resolution} · {returnStats.videoKbps} кбит/с · {returnStats.fps} fps</span><span>Аудио: {returnStats.audioKbps} кбит/с</span></div>
+      <div className="panel return-stats"><strong>Исходящий поток студии</strong><span>Видео: {returnStats.resolution} · {returnStats.videoKbps} кбит/с · {returnStats.fps} fps</span><span>Аудио: {returnStats.audioKbps} кбит/с</span><small style={{opacity:.75}}>Диагностика: {statsDebug}</small></div>
       <div className="panel">
         {guests.length === 0 ? <p className="muted">Подключённых гостей пока нет.</p> : (
           <div className="guest-table-wrap">
@@ -352,7 +469,7 @@ function StudioContent() {
                   <td>{g.resolution}</td>
                   <td>{g.bitrateKbps ? `${g.bitrateKbps} кбит/с` : "—"}</td>
                   <td><span className={`net net-${g.stability === "Хорошая" ? "good" : g.stability === "Средняя" ? "mid" : "bad"}`}>{g.stability}</span></td>
-                  <td><div className="detailed-net"><span>RTT: {g.rttMs || "—"} мс</span><span>Jitter: {g.jitterMs || "—"} мс</span><span>Потери: {g.packetLoss} пак.</span><span>Audio: {g.sampleRate ? `${g.sampleRate} Hz` : "—"}</span><span className="signal-row vdo-audio-level"><b>MIC</b><i className="signal-meter"><i style={{width:`${g.signalLevel || 0}%`}} /></i><strong>{typeof g.signalDb === "number" ? `${g.signalDb.toFixed(1)} dBFS` : "—"}</strong></span></div></td>
+                  <td><div className="detailed-net"><span>RTT: {g.rttMs || "—"} мс</span><span>Jitter: {g.jitterMs || "—"} мс</span><span>Потери: {g.packetLoss} пак.</span><span>Audio: {g.sampleRate ? `${g.sampleRate} Hz` : "—"}</span><GuestAudioMeter track={room.remoteParticipants.get(g.identity)?.getTrackPublication(Track.Source.Microphone)?.track as RemoteAudioTrack | undefined} fallbackDb={g.signalDb} /><small style={{display:"block",maxWidth:360,overflowWrap:"anywhere",opacity:.7}}>TRACK: {audioDebug[g.identity] || "ожидание"}</small></div></td>
                   <td>
                     <div className="quality-controls">
                       <select value={receiveFor(g.identity)} onChange={(e) => applyReceiveQuality(g.identity, Number(e.target.value))}>
