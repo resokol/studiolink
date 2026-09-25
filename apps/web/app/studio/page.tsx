@@ -1,10 +1,8 @@
-[Reading 495 lines from start (total: 495 lines, 0 remaining)]
-
 "use client";
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { AudioPresets, Room, RoomEvent, Track, type RemoteAudioTrack, type RemoteTrackPublication } from "livekit-client";
+import { AudioPresets, Room, RoomEvent, Track, VideoQuality, type RemoteAudioTrack, type RemoteTrackPublication } from "livekit-client";
 
 type GuestStat = {
   identity: string;
@@ -81,14 +79,63 @@ function GuestAudioMeter({ track, fallbackDb = -60 }: { track?: RemoteAudioTrack
 
 function StudioContent() {
   const params = useSearchParams();
-  const roomName = params.get("room") || "demo-room";
+  const initialRoom = params.get("room") || "demo-room";
+  const [roomName, setRoomName] = useState(initialRoom);
+  const [rooms, setRooms] = useState<string[]>([initialRoom]);
+  const [newRoomName, setNewRoomName] = useState("");
   const [room] = useState(() => new Room({ adaptiveStream: false, dynacast: false }));
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("studiolink-rooms") || "[]") as string[];
+      setRooms(Array.from(new Set([initialRoom, ...saved.filter(Boolean)])));
+    } catch {}
+  }, [initialRoom]);
+
+  useEffect(() => {
+    localStorage.setItem("studiolink-rooms", JSON.stringify(rooms));
+  }, [rooms]);
+
+  const createRoom = () => {
+    const next = newRoomName.trim();
+    if (!next) return;
+    setRooms((current) => Array.from(new Set([...current, next])));
+    setNewRoomName("");
+    setRoomName(next);
+    window.history.replaceState(null, "", `/studio?room=${encodeURIComponent(next)}`);
+  };
+
+  const switchRoom = (next: string) => {
+    if (!next || next === roomName) return;
+    setRoomName(next);
+    window.history.replaceState(null, "", `/studio?room=${encodeURIComponent(next)}`);
+  };
+
+  const renameRoom = () => {
+    const next = window.prompt("Новое название комнаты", roomName)?.trim();
+    if (!next || next === roomName) return;
+    if (rooms.includes(next)) { window.alert("Комната с таким названием уже существует."); return; }
+    setRooms((current) => current.map((name) => name === roomName ? next : name));
+    setMoveTargets((current) => Object.fromEntries(Object.entries(current).map(([id, target]) => [id, target === roomName ? next : target])));
+    setRoomName(next);
+    window.history.replaceState(null, "", `/studio?room=${encodeURIComponent(next)}`);
+  };
+
+  const deleteRoom = () => {
+    if (!window.confirm(`Удалить комнату «${roomName}» из списка Studio?`)) return;
+    const remaining = rooms.filter((name) => name !== roomName);
+    const next = remaining[0] || "demo-room";
+    setRooms(remaining.length ? remaining : [next]);
+    setRoomName(next);
+    window.history.replaceState(null, "", `/studio?room=${encodeURIComponent(next)}`);
+  };
   const [status, setStatus] = useState("Подключение…");
   const [guests, setGuests] = useState<GuestStat[]>([]);
   const [copied, setCopied] = useState<string>();
   const [receiveSettings, setReceiveSettings] = useState<Record<string, number>>({});
   const [guestVolumes, setGuestVolumes] = useState<Record<string, number>>({});
   const [guestMuted, setGuestMuted] = useState<Record<string, boolean>>({});
+  const [moveTargets, setMoveTargets] = useState<Record<string, string>>({});
   const [returnStats, setReturnStats] = useState({ resolution: "—", videoKbps: 0, audioKbps: 0, fps: 0 });
   const [statsDebug, setStatsDebug] = useState("ожидание");
   const [audioDebug, setAudioDebug] = useState<Record<string,string>>({});
@@ -436,7 +483,19 @@ function StudioContent() {
   return (
     <main>
       <div className="studio-header">
-        <div><p className="muted">StudioLink · Studio Panel</p><h1>{roomName}</h1></div>
+        <div>
+          <p className="muted">StudioLink · Studio Panel</p>
+          <h1>{roomName}</h1>
+          <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap",alignItems:"center"}}>
+            <select value={roomName} onChange={(e) => switchRoom(e.target.value)} aria-label="Активная комната">
+              {rooms.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+            <input value={newRoomName} onChange={(e) => setNewRoomName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createRoom(); }} placeholder="Название новой комнаты" aria-label="Название новой комнаты" style={{minWidth:220}} />
+            <button type="button" disabled={!newRoomName.trim()} onClick={createRoom}>+ Создать комнату</button>
+            <button type="button" onClick={renameRoom}>✎ Изменить</button>
+            <button type="button" onClick={deleteRoom}>Удалить комнату</button>
+          </div>
+        </div>
         <div className="status-pill">{status}</div>
       </div>
       <div className="panel return-panel">
@@ -464,7 +523,7 @@ function StudioContent() {
               <thead><tr><th>Гость</th><th>Камера</th><th>Разрешение</th><th>Факт. битрейт</th><th>Сеть</th><th>RTT / jitter</th><th>Входящий поток</th><th>vMix</th></tr></thead>
               <tbody>{guests.map((g) => (
                 <tr key={g.identity}>
-                  <td><strong>{g.name}</strong><small>{g.identity}</small><small>Камера: {g.cameraDevice || "—"}</small><small>CPU: {g.cpu || "—"}</small><small>GPU: {g.gpu || "—"}</small><small>ОС: {g.platform || "—"}</small></td>
+                  <td><strong>{g.name}</strong><small>{g.identity}</small><small>Камера: {g.cameraDevice || "—"}</small><small>CPU: {g.cpu || "—"}</small><small>GPU: {g.gpu || "—"}</small><small>ОС: {g.platform || "—"}</small><div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}><select value={moveTargets[g.identity] || ""} onChange={(e)=>setMoveTargets((v)=>({...v,[g.identity]:e.target.value}))}><option value="">Перевести в комнату…</option>{rooms.filter((name)=>name!==roomName).map((name)=><option key={name} value={name}>{name}</option>)}</select><button disabled={!moveTargets[g.identity]} onClick={async()=>{const targetRoom=moveTargets[g.identity];if(!targetRoom)return;const response=await fetch("/api/move-guest",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({room:roomName,identity:g.identity,targetRoom})});if(!response.ok)alert("Не удалось перевести гостя");}}>Перевести</button><button onClick={async()=>{const p=room.remoteParticipants.get(g.identity);if(!p)return;for(const pub of p.trackPublications.values()){if(pub.kind===Track.Kind.Video||pub.kind===Track.Kind.Audio){pub.setSubscribed(false);}}await new Promise(r=>setTimeout(r,250));for(const pub of p.trackPublications.values()){if(pub.kind===Track.Kind.Video||pub.kind===Track.Kind.Audio){pub.setSubscribed(true);if(pub.kind===Track.Kind.Video){pub.setVideoQuality(VideoQuality.HIGH);}}}setTimeout(()=>void refreshRef.current(),500);}}>↻ Обновить</button></div></td>
                   <td><div className="guest-preview-cell"><div className="studio-guest-video-wrap"><video autoPlay playsInline muted ref={(el) => { guestVideoRefs.current[g.identity] = el; if (el) { const p=room.remoteParticipants.get(g.identity); const pub=p?.getTrackPublication(Track.Source.Camera) as RemoteTrackPublication|undefined; if(pub?.track) pub.track.attach(el); } }} className="guest-mini-video" /><div className="studio-guest-hover"><button title="Звук" onClick={() => { const p=room.remoteParticipants.get(g.identity); const pub=Array.from(p?.trackPublications.values() || []).find((x)=>x.kind===Track.Kind.Audio); const t=pub?.track as RemoteAudioTrack|undefined; const next=!guestMuted[g.identity]; t?.setVolume(next?0:(guestVolumes[g.identity]??100)/100); setGuestMuted((s)=>({...s,[g.identity]:next})); void room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({type:"studio-monitor-mute",muted:next})),{reliable:true,destinationIdentities:[g.identity],topic:"studiolink-control"}); }}>{guestMuted[g.identity]?"🔇":"🔊"}</button><input title="Громкость гостя" type="range" min="0" max="100" value={guestVolumes[g.identity]??100} onChange={(e)=>{const v=Number(e.target.value);setGuestVolumes((s)=>({...s,[g.identity]:v}));const p=room.remoteParticipants.get(g.identity);const pub=Array.from(p?.trackPublications.values()||[]).find((x)=>x.kind===Track.Kind.Audio);if(pub?.track&&!guestMuted[g.identity])(pub.track as RemoteAudioTrack).setVolume(v/100);}}/><button title="Во весь экран" onClick={(e)=>void (e.currentTarget.closest(".studio-guest-video-wrap") as HTMLElement)?.requestFullscreen()}>⛶</button></div></div></div></td>
                   <td>{g.resolution}</td>
                   <td>{g.bitrateKbps ? `${g.bitrateKbps} кбит/с` : "—"}</td>
@@ -495,5 +554,3 @@ function StudioContent() {
 export default function StudioPage() {
   return <Suspense fallback={<main><div className="panel">Загрузка Studio Panel…</div></main>}><StudioContent /></Suspense>;
 }
-
-[executed on device: user1-System-Product-Name (49c0e26e-09f4-4b4a-a98b-545df098ad43)]
