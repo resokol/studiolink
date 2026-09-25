@@ -1,5 +1,4 @@
-[Reading 209 lines from line 1 (total: 210 lines, 0 remaining)]
-
+"use client";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -83,7 +82,8 @@ function AvCheck({ name, onJoin }: { name: string; onJoin: (v: { audioDeviceId?:
 
 function RoomContent() {
   const params = useSearchParams();
-  const roomName = params.get("name") || "demo-room";
+  const initialRoomName = params.get("name") || "demo-room";
+  const [roomName, setRoomName] = useState(initialRoomName);
   const [token, setToken] = useState<string>();
   const [error, setError] = useState<string>();
   const [choices, setChoices] = useState<{ audioDeviceId?: string; videoDeviceId?: string; height: 720 | 1080; micGain: number; listenGain: number }>();
@@ -94,6 +94,17 @@ function RoomContent() {
   const [remoteVersion, setRemoteVersion] = useState(0);
   const [guestName, setGuestName] = useState("");
   const [confirmedName, setConfirmedName] = useState("");
+  useEffect(() => {
+    if (params.get("moved") !== "1") return;
+    try {
+      const saved = sessionStorage.getItem("studiolink-guest-session");
+      if (saved) {
+        const state = JSON.parse(saved);
+        if (state.name) { setGuestName(state.name); setConfirmedName(state.name); }
+        if (state.choices) setChoices(state.choices);
+      }
+    } catch {}
+  }, [params]);
   const fallbackId = useMemo(() => Math.random().toString(36).slice(2, 8), []);
   const identity = confirmedName ? `guest-${slugifyName(confirmedName) || fallbackId}` : "";
   const [room] = useState(() => new Room({ adaptiveStream: false, dynacast: true, publishDefaults: { simulcast: true, videoEncoding: { maxBitrate: 4_000_000, maxFramerate: 30 }, degradationPreference: "maintain-resolution" } }));
@@ -121,13 +132,25 @@ function RoomContent() {
   }, [roomName, identity, confirmedName]);
 
   useEffect(() => {
-    const onData = (payload: Uint8Array, participant?: { identity: string }, _kind?: unknown, topic?: string) => {
-      if (topic !== "studiolink-control" || !participant?.identity.startsWith("studio-panel-")) return;
-      try { const msg = JSON.parse(new TextDecoder().decode(payload)); if (msg.type === "studio-monitor-mute") setMutedByStudio(!!msg.muted); } catch {}
+    let stopped = false;
+    const poll = async () => {
+      if (!identity || !confirmedName) return;
+      try {
+        const r = await fetch(`/api/guest-command?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}`, { cache: "no-store" });
+        if (r.ok) {
+          const data = await r.json();
+          if (data?.targetRoom && data.targetRoom !== roomName) {
+            try { sessionStorage.setItem("studiolink-guest-session", JSON.stringify({ name: confirmedName, choices })); } catch {}
+            window.location.href = `/room?name=${encodeURIComponent(data.targetRoom)}&moved=1`;
+            return;
+          }
+        }
+      } catch {}
+      if (!stopped) setTimeout(poll, 1000);
     };
-    room.on(RoomEvent.DataReceived, onData);
-    return () => { room.off(RoomEvent.DataReceived, onData); };
-  }, [room]);
+    void poll();
+    return () => { stopped = true; };
+  }, [roomName, identity, confirmedName, choices]);
 
   void remoteVersion;
   const remoteList = Array.from(room.remoteParticipants.values());
@@ -209,5 +232,3 @@ function RoomConnector({ room, token, choices, onRemoteChange }: { room: Room; t
 }
 
 export default function RoomPage() { return <Suspense fallback={<main><div className="panel">Загрузка комнаты…</div></main>}><RoomContent /></Suspense>; }
-
-[executed on device: user1-System-Product-Name (49c0e26e-09f4-4b4a-a98b-545df098ad43)]
